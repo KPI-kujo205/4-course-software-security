@@ -3,7 +3,7 @@ const cookieParser = require('cookie-parser');
 const onFinished = require('on-finished');
 const bodyParser = require('body-parser');
 const path = require('path');
-const port = 3001;
+const port = 3000;
 const crypto = require('crypto');
 const fs = require('fs');
 
