@@ -9,15 +9,35 @@ load_env_file() {
 
 # --- get token and export it as AUTHORIZATION_BEARER ---
 get_token() {
-  export AUTHORIZATION_BEARER=$(curl --silent --request POST \
-    --url https://$AUTH0_DOMAIN/oauth/token \
+  echo "🚀 Requesting OAuth token from Auth0..."
+
+  # Make the request and store the full response in a variable
+  local response
+  response=$(curl --silent --request POST \
+    --url "https://$AUTH0_DOMAIN/oauth/token" \
     --header 'content-type: application/json' \
     --data "{
-      \"client_id\": \"$CLIENT_ID\",
-      \"client_secret\": \"$CLIENT_SECRET\",
+      \"client_id\": \"$AUTH0_CLIENT_ID\",
+      \"client_secret\": \"$AUTH0_CLIENT_SECRET\",
       \"audience\": \"$AUTH0_AUDIENCE\",
       \"grant_type\": \"client_credentials\"
-    }" | jq -r '.access_token')
+    }")
+
+  # Log the full response
+  echo "🔹 Full OAuth response:"
+  echo "$response" | jq .
+
+  # Extract the access token safely
+  AUTHORIZATION_BEARER=$(echo "$response" | jq -r '.access_token')
+
+  # Log the extracted token
+  if [ -z "$AUTHORIZATION_BEARER" ] || [ "$AUTHORIZATION_BEARER" == "null" ]; then
+    echo "❌ Error: Failed to get access token!"
+    exit 1
+  else
+    echo "✅ Access token successfully retrieved."
+    echo "Token: $AUTHORIZATION_BEARER"
+  fi
 }
 
 # --- create user function ---
@@ -45,4 +65,4 @@ create_user() {
 # --- run everything ---
 load_env_file
 get_token
-create_user "ivankuts8240+2@gmail.com" "NotWeakPassword123"
+create_user "ivankuts8240@gmail.com" "NotWeakPassword123"
