@@ -1,6 +1,7 @@
-import {auth0Config} from '../config';
-import {type Auth0Config, TokenResponse, UserInfo} from "../types";
-import {contextStorage} from "hono/dist/types/middleware/context-storage";
+import {auth0Config} from '@/config';
+import {type Auth0Config, TokenResponse} from "@/types";
+import {Context} from "hono";
+import {setCookie} from "hono/cookie";
 
 class Auth0Service {
   private config: Auth0Config;
@@ -8,6 +9,41 @@ class Auth0Service {
   constructor(config: Auth0Config) {
     this.config = config;
   }
+
+  buildLoginWithSSOUrl() {
+    return `https://${this.config.domain}/authorize?` +
+      new URLSearchParams(
+        {
+          response_type: 'code',
+          client_id: this.config.clientId,
+          redirect_uri: this.config.loginRedirectUri,
+          scope: 'openid email profile offline_access',
+          audience: this.config.audience,
+        }
+      ).toString();
+  }
+
+  async exchangeCodeForTokens(code: string): Promise<TokenResponse> {
+    const response = await fetch(`https://${this.config.domain}/oauth/token`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        grant_type: 'authorization_code',
+        client_id: this.config.clientId,
+        client_secret: this.config.clientSecret,
+        code,
+        redirect_uri: this.config.loginRedirectUri,
+      }),
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.error_description || 'Token exchange failed');
+    }
+
+    return response.json();
+  }
+
 
   async loginWithPassword(username: string, password: string): Promise<TokenResponse> {
     const response = await fetch(`https://${this.config.domain}/oauth/token`, {
@@ -24,10 +60,11 @@ class Auth0Service {
       }),
     });
 
+    console.log('response', response)
+
     if (!response.ok) {
       const error = await response.json();
-      console.log(error)
-      throw new Error(error.message || 'Authentication failed');
+      throw new Error(error.error_description || 'Authentication failed');
     }
 
     return response.json();
@@ -53,16 +90,22 @@ class Auth0Service {
     return response.json();
   }
 
-  async getUserInfo(accessToken: string): Promise<UserInfo> {
-    const response = await fetch(`https://${this.config.domain}/userinfo`, {
-      headers: {Authorization: `Bearer ${accessToken}`},
-    });
+  async getUserInfo(accessToken: string) {
+    try {
+      const response = await fetch(`https://${this.config.domain}/userinfo`, {
+        headers: {Authorization: `Bearer ${accessToken}`},
+      });
 
-    if (!response.ok) {
-      throw new Error('Failed to fetch user info');
+      if (!response.ok) {
+        const resp = await response.text()
+        throw new Error(`Error fetching user info: ${response.status} - ${JSON.stringify(resp)}`);
+      }
+
+      return response.json();
+    } catch (error) {
+      console.error('Error fetching user info:', error);
+      throw error;
     }
-
-    return response.json();
   }
 
   async createUser(email: string, password: string, name?: string): Promise<any> {
@@ -75,11 +118,13 @@ class Auth0Service {
         password,
         connection: 'Username-Password-Authentication',
         name: name || email.split('@')[0],
+        audience: this.config.audience,
       }),
     });
 
     if (!response.ok) {
       const error = await response.json();
+      console.error(error);
       throw new Error(error.message || 'User creation failed');
     }
 
@@ -95,6 +140,47 @@ class Auth0Service {
 
   isTokenExpired(expiresAt: number): boolean {
     return Date.now() >= expiresAt;
+  }
+
+  setCookies(c: Context, tokens: TokenResponse) {
+
+    // Update cookies with new tokens
+    setCookie(c, 'access_token', tokens.access_token, {
+      httpOnly: true,
+      secure: true,
+      sameSite: 'Strict',
+      maxAge: tokens.expires_in,
+    });
+
+    if (tokens.refresh_token) {
+      setCookie(c, 'refresh_token', tokens.refresh_token, {
+        httpOnly: true,
+        secure: true,
+        sameSite: 'Strict',
+        maxAge: 30 * 24 * 60 * 60, // 30 days
+      });
+    }
+
+    const newExpiresAt = Date.now() + tokens.expires_in * 1000;
+
+    setCookie(c, 'expires_at', newExpiresAt.toString(), {
+      httpOnly: true,
+      secure: true,
+      sameSite: 'Strict',
+      maxAge: tokens.expires_in,
+    });
+  }
+
+
+  buildLogoutUrl() {
+    const logoutUrl = `https://${this.config.domain}/v2/logout?` +
+      new URLSearchParams({
+        client_id: this.config.clientId,
+        returnTo: this.config.logoutRedirectUri,
+      }).toString();
+
+
+    return logoutUrl
   }
 }
 

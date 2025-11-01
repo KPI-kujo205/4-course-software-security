@@ -3,8 +3,11 @@ import {jsxRenderer} from 'hono/jsx-renderer';
 import {getCookie} from 'hono/cookie';
 import {authMiddleware} from '../middlewares/authMiddleware';
 import {formatExpiryTime} from "../helpers/formatExpiryTime";
+import {jwtService} from "@/servicies/JwtService";
+import {auth0Service} from "@/servicies/auth0Service";
 
 export const frontendRouter = new Hono();
+
 
 frontendRouter.use('*', jsxRenderer(({children}) => (
   <html>
@@ -123,8 +126,11 @@ frontendRouter.use('*', jsxRenderer(({children}) => (
 )));
 
 frontendRouter.use('/dashboard', authMiddleware).get(async (c) => {
-  const user = c.get('user');
-  const expiresAt = c.get('expiresAt');
+  const accessToken = c.get('access_token');
+
+  const user = await auth0Service.getUserInfo(accessToken)
+
+  const expiresAt = Number(getCookie(c, 'expires_at'));
   const formattedExpiryTime = formatExpiryTime(expiresAt);
 
   return c.render(
@@ -191,8 +197,6 @@ frontendRouter.get('/', async (c) => {
         <div>
           <h2>Login</h2>
           <form class="form" action="/auth/login" method="post">
-            <input type="email" name="email" placeholder="Email" required/>
-            <input type="password" name="password" placeholder="Password" required/>
             <button type="submit">Login</button>
           </form>
         </div>

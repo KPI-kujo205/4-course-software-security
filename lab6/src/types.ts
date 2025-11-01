@@ -3,6 +3,8 @@ export interface Auth0Config {
   clientId: string;
   clientSecret: string;
   audience: string;
+  loginRedirectUri: string;
+  logoutRedirectUri: string;
 }
 
 export interface TokenResponse {
