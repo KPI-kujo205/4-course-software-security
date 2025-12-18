@@ -22,8 +22,8 @@ export class Node {
       this.certData = {
         certificate: data.certificate,
         key: data.key,
-        caCertificate: data.caCertificate,
         issuedAt: new Date(),
+        revoked: false
       }
     } catch (err: any) {
       this.logger.log(`Failed to issue certificate: ${err.message}`)
