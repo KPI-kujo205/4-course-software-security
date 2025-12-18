@@ -1,0 +1,6 @@
+# CA server config
+CA_URL=http://ca_server:8888
+CA_PORT=8888
+
+# shared node config
+TOPOLOGY=a:b,b:c,c:d,c:d

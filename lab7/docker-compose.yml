@@ -1,0 +1,47 @@
+services:
+  ca_server:
+    build:
+      context: .
+      dockerfile: ./src/ca_server/Dockerfile
+    env_file:
+      - .shared_env
+  node_a:
+    build:
+      context: .
+      dockerfile: ./src/node/Dockerfile
+    env_file:
+      - .shared_env
+    environment:
+      NODE_ID: "a"
+    depends_on:
+      - ca_server
+  node_b:
+    build:
+      context: .
+      dockerfile: ./src/node/Dockerfile
+    env_file:
+      - .shared_env
+    environment:
+      NODE_ID: "b"
+    depends_on:
+      - ca_server
+  node_c:
+    build:
+      context: .
+      dockerfile: ./src/node/Dockerfile
+    env_file:
+      - .shared_env
+    environment:
+      NODE_ID: "c"
+    depends_on:
+      - ca_server
+  node_d:
+    build:
+      context: .
+      dockerfile: ./src/node/Dockerfile
+    env_file:
+      - .shared_env
+    environment:
+      NODE_ID: "d"
+    depends_on:
+      - ca_server
