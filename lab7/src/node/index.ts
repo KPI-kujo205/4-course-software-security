@@ -1,5 +1,5 @@
 import {Logger} from '@/logger'
-import {NodeConfig, NodeCert} from './config'
+import {NodeConfig, NodeCert} from '@/node/config'
 import {CAApi} from "@/node/caApi";
 
 export class Node {

@@ -1,10 +1,12 @@
 import * as pem from 'pem'
 import {assert} from "@/helpers/assert";
 import {NodeCert} from "@/node/config";
+import {Logger} from "@/logger";
 
 class CertificateAuthorityServer {
   private caCert: string = ''
   private caKey: string = ''
+  private logger: Logger;
   private nodeStore = new Map<string, NodeCert>()
   private readonly PORT;
 
@@ -12,6 +14,8 @@ class CertificateAuthorityServer {
     assert(process.env.CA_PORT, 'CA_PORT is not set')
 
     this.PORT = process.env.CA_PORT
+
+    this.logger = new Logger('CertificateAuthorityServer')
 
     this.initCA()
   }
@@ -29,7 +33,7 @@ class CertificateAuthorityServer {
       await Bun.write('ca_cert.pem', this.caCert)
       await Bun.write('ca_key.pem', this.caKey)
 
-      console.log('[CA] Root certificate initialized')
+      this.logger.log('[CA] Root certificate initialized')
       this.startServer()
     })
   }
@@ -145,10 +149,10 @@ class CertificateAuthorityServer {
       }
     })
 
-    console.log(`\n[CA] HTTP Server listening on http://localhost:${this.PORT}`)
-    console.log('[CA] Available endpoints:')
-    console.log('  POST /api/certificates/issue')
-    console.log('  POST /api/certificates/validate')
+    this.logger.log(`\nHTTP Server listening on http://localhost:${this.PORT}`)
+    this.logger.log('Available endpoints:')
+    this.logger.log('POST /api/certificates/issue')
+    this.logger.log('POST /api/certificates/validate')
   }
 }
 
