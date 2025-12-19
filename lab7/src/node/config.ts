@@ -1,5 +1,6 @@
 import * as process from "node:process";
 import {assert} from "@/helpers/assert";
+import {Topology} from "@/node/Topology";
 
 export interface NodeCert {
   certificate: string
@@ -22,9 +23,14 @@ export class NodeConfig {
 
   topology: Topology
 
+  /**
+   * port of a node
+   */
+  port: number;
+
   constructor() {
     const envsVars = [
-      'NODE_ID', 'CA_URL', 'TOPOLOGY_NEIGHBOURS'
+      'NODE_ID', 'CA_URL', 'TOPOLOGY_NEIGHBOURS', 'TOPOLOGY_PORTS', 'NODE_PORT'
     ] as const
 
     for (const envVar of envsVars) {
@@ -33,41 +39,8 @@ export class NodeConfig {
 
     this.nodeId = process.env.NODE_ID!;
     this.caUrl = process.env.CA_URL!
-
-    this.topology = new Topology(process.env.TOPOLOGY_NEIGHBOURS!, this.nodeId)
+    this.port = Number(process.env.NODE_PORT!)
+    this.topology = new Topology(process.env.TOPOLOGY_NEIGHBOURS!, process.env.TOPOLOGY_PORTS!, this.nodeId)
   }
 }
 
-class Topology {
-  private nodeId: string;
-
-  private neighboursMap: Record<string, Set<string>>;
-
-  /**
-   * @param neighbours -
-   * server pairs in the topology, separated by the comma, like a:b,b:c etc
-   *
-   * @param nodeId
-   * id of a node
-   */
-  constructor(private neighbours: string, nodeId: string) {
-    this.nodeId = nodeId;
-
-    const neighbourMap: Record<string, Set<string>> = {};
-
-    for (const pair of this.neighbours.split(',')) {
-      const [from, to] = pair.split(':');
-      if (!neighbourMap[from]) neighbourMap[from] = new Set();
-      if (!neighbourMap[to]) neighbourMap[to] = new Set();
-      neighbourMap[from].add(to);
-      neighbourMap[to].add(from);
-    }
-
-    this.neighboursMap = neighbourMap;
-  }
-
-  isNodeNeighbour(someNode: string): boolean {
-    const neighbours = this.neighboursMap[this.nodeId];
-    return neighbours ? neighbours.has(someNode) : false;
-  }
-}
