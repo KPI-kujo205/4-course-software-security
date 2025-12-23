@@ -199,15 +199,16 @@ export class Node {
 
         // check certificate validity with CA
         try {
-          const validation = await this.ca.validateCertificate(from);
+          const validation = await this.ca.validateCertificate(payload.certificate);
 
           if (!validation.valid) {
-            this.logger.log(`❌ Certificate validation FAILED for ${from}:  ${validation.reason}`);
-            return; // Перериваємо handshake
+            this.logger.log(`❌ Certificate REJECTED: ${validation.reason}`);
+            return;
           }
 
+          this.logger.log(`✅ Certificate validated for node ${validation.nodeId}`);
         } catch (err: any) {
-          this.logger.log(`❌ Certificate validation ERROR for ${from}: ${err.message}`);
+          this.logger.log(`❌ Validation error: ${err.message}`);
           return;
         }
 
@@ -285,7 +286,7 @@ export class Node {
   }
 
   private async transmit(target: string, data: string, type: PacketType, existingMsgId?: string) {
-    const MTU = 50;
+    const MTU = 5000;
     const msgId = existingMsgId || crypto.randomUUID();
     const total = Math.ceil(data.length / MTU);
 

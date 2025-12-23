@@ -3,6 +3,8 @@ import {assert} from "@/helpers/assert";
 import {NodeCert} from "@/node/config";
 import {Logger} from "@/logger";
 
+import {X509Certificate} from 'node:crypto';
+
 class CertificateAuthorityServer {
   private caCert: string = ''
   private caKey: string = ''
@@ -82,6 +84,7 @@ class CertificateAuthorityServer {
     });
   }
 
+
   private validateCertificate(nodeId: string) {
     if (!this.nodeStore.has(nodeId)) {
       return {valid: false, reason: 'Certificate not found'}
@@ -91,6 +94,62 @@ class CertificateAuthorityServer {
       return {valid: false, reason: 'Certificate has been revoked'}
     }
     return {valid: true, issuedAt: certData.issuedAt}
+  }
+
+  private validateCertificateByContent(certificatePem: string): any {
+    try {
+      // 1. Парсимо сертифікат
+      const cert = new X509Certificate(certificatePem)
+
+      // 2. Перевіряємо підпис CA
+      const caCert = new X509Certificate(this.caCert)
+      const isSignatureValid = cert.verify(caCert.publicKey)
+
+      if (!isSignatureValid) {
+        return {
+          valid: false,
+          reason: 'Certificate not signed by this CA'
+        }
+      }
+
+      // 3. Перевіряємо термін дії
+      const now = new Date()
+      const validFrom = new Date(cert.validFrom)
+      const validTo = new Date(cert.validTo)
+
+      if (now < validFrom || now > validTo) {
+        return {
+          valid: false,
+          reason: 'Certificate expired or not yet valid'
+        }
+      }
+
+      // 4. Перевіряємо, чи не відкликаний (по базі CA)
+      const subject = cert.subject  // CN=node-d
+      const nodeId = subject.match(/CN=node-(\w+)/)?.[1]
+
+      if (nodeId) {
+        const storedCert = this.nodeStore.get(nodeId)
+        if (storedCert?.revoked) {
+          return {
+            valid: false,
+            reason: 'Certificate has been revoked'
+          }
+        }
+      }
+
+      return {
+        valid: true,
+        nodeId,
+        validFrom: cert.validFrom,
+        validTo: cert.validTo
+      }
+    } catch (err: any) {
+      return {
+        valid: false,
+        reason: `Invalid certificate format: ${err.message}`
+      }
+    }
   }
 
   private parsePath(url: string) {
@@ -153,16 +212,14 @@ class CertificateAuthorityServer {
 
         if (req.method === 'POST' && pathname === '/api/certificates/validate') {
           const body = await req.json()
-          const {nodeId} = body
+          const {certificate} = body
 
-          if (!nodeId) {
-            return this.sendJSON({error: 'nodeId is required'}, 400)
+          if (!certificate) {
+            return this.sendJSON({error: 'certificate is required'}, 400)
           }
 
-          this.logger.log('validating certificate for node-' + nodeId)
-
-          const result = this.validateCertificate(nodeId)
-          return this.sendJSON({nodeId, ...result})
+          const result = this.validateCertificateByContent(certificate)
+          return this.sendJSON(result)
         }
 
         return this.sendJSON({

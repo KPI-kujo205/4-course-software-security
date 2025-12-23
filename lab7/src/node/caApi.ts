@@ -39,11 +39,11 @@ export class CAApi {
     return res.json()
   }
 
-  async validateCertificate(nodeId: string): Promise<CertificateValidateResponse> {
+  async validateCertificate(certificate: string): Promise<CertificateValidateResponse> {
     const res = await fetch(`${this.caUrl}/api/certificates/validate`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({nodeId})
+      body: JSON.stringify({certificate})  // ✅ Надсилаємо сам сертифікат
     })
     if (!res.ok) {
       const err: CertificateValidateError = await res.json()
