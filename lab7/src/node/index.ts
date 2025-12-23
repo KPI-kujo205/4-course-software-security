@@ -21,7 +21,6 @@ export class Node {
   private readonly assembler = new PacketAssembler();
   private certData?: NodeCert;
 
-  // Security Contexts
   private sessionKeys = new Map<string, Buffer>(); // TargetID -> AES Key
   private handshakeContexts = new Map<string, { clientRandom: string, serverRandom: string }>();
   private seenBroadcasts = new Set<string>();
@@ -103,12 +102,39 @@ export class Node {
   }
 
   private async forward(packet: NetworkPacket): Response {
-    // Prevent broadcast loops
     if (packet.header.dest === 'ALL') {
-      if (this.seenBroadcasts.has(packet.header.msgId)) return new Response("Already Processed");
+      if (this.seenBroadcasts.has(packet.header.msgId)) {
+        return new Response("Already Processed");
+      }
       this.seenBroadcasts.add(packet.header.msgId);
+
+      //  Broadcast forwarding - надсилаємо до всіх сусідів (крім відправника)
+      const neighbours = this.config.topology.getNeighbours();
+
+      for (const neighbour of neighbours) {
+        // Не надсилаємо назад до відправника
+        if (neighbour === packet.header.src) continue;
+
+        const nextHopUrl = this.config.topology.getNextHopUrl(neighbour);
+        if (!nextHopUrl) continue;
+
+        this.logger.log(`[FORWARDING BROADCAST] from ${packet.header.src} to ${neighbour} (idx: ${packet.header.packetIdx}/${packet.header.total})`);
+
+        try {
+          await fetch(`${nextHopUrl}/receive`, {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify(packet),
+          });
+        } catch (e: any) {
+          this.logger.log(`[FORWARDING ERROR] Broadcast to ${neighbour} failed: ${e.message}`);
+        }
+      }
+
+      return new Response("Broadcast Forwarded");
     }
 
+    //  Unicast forwarding (звичайна маршрутизація)
     if (packet.header.type === "DATA") {
       this.logger.log(`[SNOOPING ATTEMPT] Packet body (encrypted): ${packet.body.substring(0, 50)}...`);
     }
@@ -148,6 +174,9 @@ export class Node {
       case "DATA":
         this.handleSecureData(fullMessage, packet.header.src);
         break;
+      case "BROADCAST":
+        this.logger.log(`[BROADCAST FROM ${packet.header.src}]:  ${fullMessage}`);
+        break;
     }
   }
 
@@ -168,13 +197,26 @@ export class Node {
         assert(payload.certificate, "No certificate provided");
         this.logger.log(`Verifying certificate for ${from}... `);
 
+        // check certificate validity with CA
+        try {
+          const validation = await this.ca.validateCertificate(from);
+
+          if (!validation.valid) {
+            this.logger.log(`❌ Certificate validation FAILED for ${from}:  ${validation.reason}`);
+            return; // Перериваємо handshake
+          }
+
+        } catch (err: any) {
+          this.logger.log(`❌ Certificate validation ERROR for ${from}: ${err.message}`);
+          return;
+        }
+
         const premaster = crypto.randomBytes(32);
-        // ✅ Extract the public key from the certificate
         const publicKey = crypto.createPublicKey(payload.certificate.trim());
 
         const encryptedPremaster = crypto.publicEncrypt(
           {
-            key: publicKey,  // ✅ Use extracted public key, not the certificate
+            key: publicKey,
             padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
             oaepHash: "sha256",
           },
@@ -191,12 +233,10 @@ export class Node {
         break;
 
       case 'KEY_EXCHANGE':
-        console.log('this.certData', this.certData)
         assert(this.certData?.key, "Private key missing");
 
         const encryptedBuffer = Buffer.from(payload.data, 'base64');
 
-        // LOG THESE TWO THINGS:
         this.logger.log(`[DEBUG] Received Payload Length: ${payload.data.length}`);
         this.logger.log(`[DEBUG] Encrypted Buffer Byte Length: ${encryptedBuffer.length}`);
 
@@ -241,7 +281,7 @@ export class Node {
   private async initiateBroadcast(data: string) {
     const msgId = crypto.randomUUID();
     this.logger.log(`Initiating broadcast ${msgId}`);
-    await this.transmit('ALL', data, 'DATA', msgId);
+    await this.transmit('ALL', data, 'BROADCAST', msgId);
   }
 
   private async transmit(target: string, data: string, type: PacketType, existingMsgId?: string) {
@@ -249,6 +289,45 @@ export class Node {
     const msgId = existingMsgId || crypto.randomUUID();
     const total = Math.ceil(data.length / MTU);
 
+    // broadcast
+    if (target === 'ALL') {
+      const neighbours = this.config.topology.getNeighbours();
+
+      if (!neighbours || neighbours.length === 0) {
+        this.logger.log(`No neighbours to broadcast to`);
+        return;
+      }
+
+      // Надсилаємо до всіх сусідів
+      for (const neighbour of neighbours) {
+        const nextHop = this.config.topology.getNextHopUrl(neighbour);
+
+        if (!nextHop) continue;
+
+        for (let i = 0; i < total; i++) {
+          const chunk = data.substring(i * MTU, (i + 1) * MTU);
+          const packet = this.createPacket(target, msgId, chunk, i, total, type);
+
+          try {
+            const response = await fetch(`${nextHop}/receive`, {
+              method: "POST",
+              headers: {"Content-Type": "application/json"},
+              body: JSON.stringify(packet),
+            });
+
+            if (!response.ok) {
+              this.logger.log(`Broadcast chunk ${i} failed to send to ${neighbour}`);
+            }
+          } catch (e: any) {
+            this.logger.log(`Broadcast error to ${neighbour}: ${e.message}`);
+          }
+        }
+      }
+
+      return;
+    }
+
+    // ✅ Звичайна unicast передача
     const nextHop = this.config.topology.getNextHopUrl(target);
     assert(nextHop, `Unreachable: ${target}`);
 

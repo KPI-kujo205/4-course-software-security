@@ -1,5 +1,5 @@
 // The type of protocol being carried inside the packet
-export type PacketType = 'HANDSHAKE' | 'DATA' | 'CONTROL';
+export type PacketType = 'HANDSHAKE' | 'DATA' | 'BROADCAST';
 
 export interface PacketHeader {
   src: string;          // Origin node ID (e.g., 'a')

@@ -15,7 +15,7 @@ class CertificateAuthorityServer {
 
     this.PORT = process.env.CA_PORT
 
-    this.logger = new Logger('CertificateAuthorityServer')
+    this.logger = new Logger('ca')
 
     this.initCA()
   }
@@ -154,9 +154,13 @@ class CertificateAuthorityServer {
         if (req.method === 'POST' && pathname === '/api/certificates/validate') {
           const body = await req.json()
           const {nodeId} = body
+
           if (!nodeId) {
             return this.sendJSON({error: 'nodeId is required'}, 400)
           }
+
+          this.logger.log('validating certificate for node-' + nodeId)
+
           const result = this.validateCertificate(nodeId)
           return this.sendJSON({nodeId, ...result})
         }

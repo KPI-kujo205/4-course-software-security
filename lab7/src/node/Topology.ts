@@ -95,4 +95,8 @@ export class Topology {
     const port = this.portsMap[id];
     return `http://node_${id}:${port}`;
   }
+
+  getNeighbours(): string[] {
+    return Array.from(this.neighboursMap[this.nodeId] || []);
+  }
 }
