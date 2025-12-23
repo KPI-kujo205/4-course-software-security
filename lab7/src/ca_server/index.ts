@@ -40,24 +40,46 @@ class CertificateAuthorityServer {
 
   private issueCertificate(nodeId: string): Promise<any> {
     return new Promise((resolve, reject) => {
-      pem.createCertificate({
-        days: 365,
-        serviceKey: this.caKey,
-        serviceCertificate: this.caCert,
-        commonName: `node-${nodeId}`,
-        organization: 'TLS-Network',
-        country: 'UA'
-      }, (err: Error | null, keys: any) => {
-        if (err) return reject(err)
-        this.nodeStore.set(nodeId, {
-          certificate: keys.certificate,
-          key: keys.serviceKey,
-          issuedAt: new Date(),
-          revoked: false
-        })
-        resolve(keys)
-      })
-    })
+      // Step 1: Generate a NEW keypair for this specific node
+      pem.createPrivateKey(2048, (err: Error | null, privateKey: any) => {
+        if (err) return reject(err);
+
+        // Step 2: Create a CSR (Certificate Signing Request) with the new key
+        pem.createCSR({
+          commonName: `node-${nodeId}`,
+          organization: 'TLS-Network',
+          country: 'UA',
+          clientKey: privateKey.key
+        }, (err: Error | null, csr: any) => {
+          if (err) return reject(err);
+
+          // Step 3: Sign the CSR with CA's key to create the certificate
+          pem.createCertificate({
+            days: 365,
+            serviceKey: this.caKey,
+            serviceCertificate: this.caCert,
+            csr: csr.csr,
+            clientKey: privateKey.key
+          }, (err: Error | null, cert: any) => {
+            if (err) return reject(err);
+
+            const result = {
+              certificate: cert.certificate,
+              serviceKey: privateKey.key  // ✅ Now this is the node's private key!
+            };
+
+            this.nodeStore.set(nodeId, {
+              certificate: result.certificate,
+              key: result.serviceKey,
+              issuedAt: new Date(),
+              revoked: false
+            });
+
+            resolve(result);
+          });
+        });
+      });
+    });
   }
 
   private validateCertificate(nodeId: string) {

@@ -40,13 +40,15 @@ export class Node {
   private async setupSecurity() {
     try {
       const data = await this.ca.issueCertificate(this.config.nodeId);
+
       this.certData = {
-        certificate: data.certificate, // This is a signed object/string
-        key: data.key,                 // Private Key
+        certificate: data.certificate,
+        key: data.key,
         issuedAt: new Date(),
         revoked: false
       };
-      this.logger.log('Advanced Security: RSA Keys generated and CA Certificate stored');
+
+      this.logger.log('Advanced Security:  RSA Keys generated and CA Certificate stored');
     } catch (err: any) {
       this.logger.log(`Security Setup Failed: ${err.message}`);
       throw err;
@@ -85,8 +87,10 @@ export class Node {
     return new Response("Not Found", {status: 404});
   }
 
-  private async onPacketReceived(packet: NetworkPacket): Promise<Response> {
+  private async onPacketReceived(packet: NetworkPacket): Response {
     const isForMe = packet.header.dest === this.config.nodeId || packet.header.dest === 'ALL';
+
+    this.logger.log(`[RECEIVE] Packet from ${packet.header.src} to ${packet.header.dest} (type: ${packet.header.type}, isForMe: ${isForMe})`);
 
     if (isForMe) {
       this.processInbound(packet);
@@ -98,15 +102,27 @@ export class Node {
     return this.forward(packet);
   }
 
-  private async forward(packet: NetworkPacket): Promise<Response> {
+  private async forward(packet: NetworkPacket): Response {
     // Prevent broadcast loops
     if (packet.header.dest === 'ALL') {
       if (this.seenBroadcasts.has(packet.header.msgId)) return new Response("Already Processed");
       this.seenBroadcasts.add(packet.header.msgId);
     }
 
+    if (packet.header.type === "DATA") {
+      this.logger.log(`[SNOOPING ATTEMPT] Packet body (encrypted): ${packet.body.substring(0, 50)}...`);
+    }
+
+    this.logger.log(`[FORWARDING] Packet from ${packet.header.src} to ${packet.header.dest} (type: ${packet.header.type}, idx: ${packet.header.packetIdx}/${packet.header.total})`);
+
     const nextHopUrl = this.config.topology.getNextHopUrl(packet.header.dest);
-    if (!nextHopUrl) return new Response("No Route", {status: 404});
+
+    if (!nextHopUrl) {
+      this.logger.log(`[FORWARDING ERROR] No route to ${packet.header.dest}`);
+      return new Response("No Route", {status: 404});
+    }
+
+    this.logger.log(`[FORWARDING] Next hop: ${nextHopUrl}`);
 
     try {
       await fetch(`${nextHopUrl}/receive`, {
@@ -116,6 +132,7 @@ export class Node {
       });
       return new Response("Forwarded");
     } catch (e: any) {
+      this.logger.log(`[FORWARDING ERROR] Failed to forward to ${nextHopUrl}: ${e.message}`);
       return new Response("Forwarding Error", {status: 502});
     }
   }
@@ -148,14 +165,16 @@ export class Node {
         break;
 
       case 'SERVER_HELLO':
-        // ADVANCED: Verify Certificate via CA Public Key (Simulated)
         assert(payload.certificate, "No certificate provided");
-        this.logger.log(`Verifying certificate for ${from}...`);
+        this.logger.log(`Verifying certificate for ${from}... `);
 
         const premaster = crypto.randomBytes(32);
+        // ✅ Extract the public key from the certificate
+        const publicKey = crypto.createPublicKey(payload.certificate.trim());
+
         const encryptedPremaster = crypto.publicEncrypt(
           {
-            key: payload.certificate.trim(),
+            key: publicKey,  // ✅ Use extracted public key, not the certificate
             padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
             oaepHash: "sha256",
           },
@@ -226,7 +245,7 @@ export class Node {
   }
 
   private async transmit(target: string, data: string, type: PacketType, existingMsgId?: string) {
-    const MTU = 10;
+    const MTU = 50;
     const msgId = existingMsgId || crypto.randomUUID();
     const total = Math.ceil(data.length / MTU);
 
@@ -258,7 +277,10 @@ export class Node {
   private encrypt(text: string, key: Buffer): string {
     const iv = crypto.randomBytes(12);
     const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
-    return Buffer.concat([iv, cipher.update(text, 'utf8'), cipher.final(), cipher.getAuthTag()]).toString('base64');
+    const encrypted = Buffer.concat([cipher.update(text, 'utf8'), cipher.final()]);
+    const tag = cipher.getAuthTag();
+
+    return `${iv.toString('hex')}:${tag.toString('hex')}:${encrypted.toString('hex')}`;
   }
 
   private handleSecureData(data: string, from: string) {
@@ -267,6 +289,10 @@ export class Node {
 
     try {
       const [ivHex, tagHex, encryptedHex] = data.split(':');
+
+      if (!ivHex || !tagHex || !encryptedHex) {
+        throw new Error('Invalid encrypted data format');
+      }
 
       const decipher = crypto.createDecipheriv(
         'aes-256-gcm',
@@ -281,7 +307,7 @@ export class Node {
 
       this.logger.log(`[SECURE DATA FROM ${from}] (Decrypted): ${decrypted}`);
     } catch (err: any) {
-      this.logger.log(`Decryption failed from ${from}: ${err.message}`);
+      this.logger.log(`Decryption failed from ${from}:  ${err.message}`);
     }
   }
 
