@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import {Logger} from '@/logger';
 import {NodeConfig, NodeCert} from '@/node/config';
 import {CAApi} from "@/node/caApi";
@@ -5,11 +6,25 @@ import {NetworkPacket, PacketType} from '@/node/types';
 import {assert} from "@/helpers/assert";
 import {PacketAssembler} from "@/node/PacketAssembler";
 
+// Types for Advanced TLS Handshake
+type HandshakeStep = 'CLIENT_HELLO' | 'SERVER_HELLO' | 'KEY_EXCHANGE' | 'FINISHED';
+
+interface HandshakePayload {
+  step: HandshakeStep;
+  data: string;       // Randoms, Encrypted Secrets, or "READY"
+  certificate?: string; // Sent during SERVER_HELLO
+}
+
 export class Node {
   private readonly logger: Logger;
   private readonly ca: CAApi;
   private readonly assembler = new PacketAssembler();
   private certData?: NodeCert;
+
+  // Security Contexts
+  private sessionKeys = new Map<string, Buffer>(); // TargetID -> AES Key
+  private handshakeContexts = new Map<string, { clientRandom: string, serverRandom: string }>();
+  private seenBroadcasts = new Set<string>();
 
   constructor(private readonly config: NodeConfig) {
     this.logger = new Logger(config);
@@ -18,20 +33,20 @@ export class Node {
   }
 
   private async init() {
-    await this.setupCACertificates();
+    await this.setupSecurity();
     this.startServer();
   }
 
-  private async setupCACertificates() {
+  private async setupSecurity() {
     try {
       const data = await this.ca.issueCertificate(this.config.nodeId);
       this.certData = {
-        certificate: data.certificate,
-        key: data.key,
+        certificate: data.certificate, // This is a signed object/string
+        key: data.key,                 // Private Key
         issuedAt: new Date(),
         revoked: false
       };
-      this.logger.log('Certificate issued and stored successfully');
+      this.logger.log('Advanced Security: RSA Keys generated and CA Certificate stored');
     } catch (err: any) {
       this.logger.log(`Security Setup Failed: ${err.message}`);
       throw err;
@@ -41,9 +56,10 @@ export class Node {
   private startServer() {
     Bun.serve({
       port: this.config.port,
+      hostname: "0.0.0.0",
       fetch: (req) => this.handleHttpRequest(req),
     });
-    this.logger.log(`Node ${this.config.nodeId} listening on port ${this.config.port}`);
+    this.logger.log(`Node ${this.config.nodeId} active on port ${this.config.port}`);
   }
 
   private async handleHttpRequest(req: Request): Promise<Response> {
@@ -55,113 +71,224 @@ export class Node {
     }
 
     if (url.pathname === "/initiate" && req.method === "POST") {
-      const {target, data} = await req.json();
-      assert(target && data, "Target and data are required for initiation");
+      const {target, data, isBroadcast} = await req.json();
 
-      await this.transmit(target, data, "DATA");
-      return Response.json({status: "Transmission Started"});
+      if (isBroadcast) {
+        await this.initiateBroadcast(data);
+        return Response.json({status: "Broadcast Started"});
+      }
+
+      await this.initiateSecureTransmission(target, data);
+      return Response.json({status: "Secure Handshake/Transmission Started"});
     }
 
     return new Response("Not Found", {status: 404});
   }
 
-  /**
-   * Core logic for handling any incoming NetworkPacket.
-   */
   private async onPacketReceived(packet: NetworkPacket): Promise<Response> {
-    const isForMe = packet.header.dest === this.config.nodeId;
+    const isForMe = packet.header.dest === this.config.nodeId || packet.header.dest === 'ALL';
 
     if (isForMe) {
       this.processInbound(packet);
+      // If it's a broadcast, we still need to forward it to others
+      if (packet.header.dest === 'ALL') return this.forward(packet);
       return new Response("Received");
     }
 
     return this.forward(packet);
   }
 
-  /**
-   * Forwards a packet to the next hop based on topology.
-   */
   private async forward(packet: NetworkPacket): Promise<Response> {
-    const nextHopUrl = this.config.topology.getNextHopUrl(packet.header.dest);
-
-    if (!nextHopUrl) {
-      this.logger.log(`Routing Error: No path to ${packet.header.dest}`);
-      return new Response("Destination Unreachable", {status: 404});
+    // Prevent broadcast loops
+    if (packet.header.dest === 'ALL') {
+      if (this.seenBroadcasts.has(packet.header.msgId)) return new Response("Already Processed");
+      this.seenBroadcasts.add(packet.header.msgId);
     }
 
-    const targetUrl = `${nextHopUrl}/receive`;
-    this.logger.log(`Routing: ${packet.header.src} -> ${this.config.nodeId} -> ${packet.header.dest}`);
+    const nextHopUrl = this.config.topology.getNextHopUrl(packet.header.dest);
+    if (!nextHopUrl) return new Response("No Route", {status: 404});
 
     try {
-      const res = await fetch(targetUrl, {
+      await fetch(`${nextHopUrl}/receive`, {
         method: "POST",
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify(packet),
       });
-
-      assert(res.ok, `Upstream responded with ${res.status}`);
       return new Response("Forwarded");
     } catch (e: any) {
-      this.logger.log(`Forwarding failed to ${targetUrl}: ${e.message}`);
-      return new Response("Gateway Error", {status: 502});
+      return new Response("Forwarding Error", {status: 502});
     }
   }
 
-  /**
-   * Handles packet assembly and protocol dispatching.
-   */
   private processInbound(packet: NetworkPacket) {
     const fullMessage = this.assembler.assemble(packet);
+    if (!fullMessage) return;
 
-    if (fullMessage) {
-      this.logger.log(`[Message from ${packet.header.src}]: ${fullMessage}`);
-      this.dispatchProtocol(packet.header.type, fullMessage, packet.header.src);
+    switch (packet.header.type) {
+      case "HANDSHAKE":
+        this.handleHandshake(JSON.parse(fullMessage), packet.header.src);
+        break;
+      case "DATA":
+        this.handleSecureData(fullMessage, packet.header.src);
+        break;
     }
   }
 
-  private dispatchProtocol(type: PacketType, message: string, from: string) {
-    if (type === "HANDSHAKE") {
-      // TODO: Implement TLS Handshake logic
+  private async handleHandshake(payload: HandshakePayload, from: string) {
+    switch (payload.step) {
+      case 'CLIENT_HELLO':
+        const serverRandom = crypto.randomBytes(16).toString('hex');
+        this.handshakeContexts.set(from, {clientRandom: payload.data, serverRandom});
+
+        await this.transmit(from, JSON.stringify({
+          step: 'SERVER_HELLO',
+          data: serverRandom,
+          certificate: this.certData?.certificate
+        }), "HANDSHAKE");
+        break;
+
+      case 'SERVER_HELLO':
+        // ADVANCED: Verify Certificate via CA Public Key (Simulated)
+        assert(payload.certificate, "No certificate provided");
+        this.logger.log(`Verifying certificate for ${from}...`);
+
+        const premaster = crypto.randomBytes(32);
+        const encryptedPremaster = crypto.publicEncrypt(
+          {
+            key: payload.certificate.trim(),
+            padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+            oaepHash: "sha256",
+          },
+          premaster
+        );
+
+        const ctx = this.handshakeContexts.get(from);
+        this.sessionKeys.set(from, this.deriveSessionKey(premaster, ctx!.clientRandom, payload.data));
+
+        await this.transmit(from, JSON.stringify({
+          step: 'KEY_EXCHANGE',
+          data: encryptedPremaster.toString('base64')
+        }), "HANDSHAKE");
+        break;
+
+      case 'KEY_EXCHANGE':
+        console.log('this.certData', this.certData)
+        assert(this.certData?.key, "Private key missing");
+
+        const encryptedBuffer = Buffer.from(payload.data, 'base64');
+
+        // LOG THESE TWO THINGS:
+        this.logger.log(`[DEBUG] Received Payload Length: ${payload.data.length}`);
+        this.logger.log(`[DEBUG] Encrypted Buffer Byte Length: ${encryptedBuffer.length}`);
+
+        const decryptedPremaster = crypto.privateDecrypt(
+          {
+            key: this.certData.key,
+            padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+            oaepHash: "sha256",
+          },
+          encryptedBuffer
+        );
+
+        const sCtx = this.handshakeContexts.get(from);
+
+        this.sessionKeys.set(from, this.deriveSessionKey(decryptedPremaster, sCtx!.clientRandom, sCtx!.serverRandom));
+        await this.transmit(from, JSON.stringify({step: 'FINISHED', data: 'READY'}), "HANDSHAKE");
+        break;
+
+      case 'FINISHED':
+        this.logger.log(`TLS Handshake Complete with ${from}. Channel Secure.`);
+        break;
     }
   }
 
-  /**
-   * Public method to send messages (applies MTU fragmentation).
-   */
-  private async transmit(target: string, data: string, type: PacketType) {
-    const MTU = 10;
+  // --- DATA TRANSMISSION ---
+
+  private async initiateSecureTransmission(target: string, data: string) {
+    if (!this.sessionKeys.has(target)) {
+      this.logger.log(`Starting Handshake with ${target}...`);
+      const clientRandom = crypto.randomBytes(16).toString('hex');
+      this.handshakeContexts.set(target, {clientRandom, serverRandom: ''});
+      await this.transmit(target, JSON.stringify({step: 'CLIENT_HELLO', data: clientRandom}), "HANDSHAKE");
+      // In a real app, we'd queue the data until FINISHED
+      return;
+    }
+
+    // Advanced: AES-GCM Encryption
+    const encrypted = this.encrypt(data, this.sessionKeys.get(target)!);
+    await this.transmit(target, encrypted, "DATA");
+  }
+
+  private async initiateBroadcast(data: string) {
     const msgId = crypto.randomUUID();
+    this.logger.log(`Initiating broadcast ${msgId}`);
+    await this.transmit('ALL', data, 'DATA', msgId);
+  }
+
+  private async transmit(target: string, data: string, type: PacketType, existingMsgId?: string) {
+    const MTU = 10;
+    const msgId = existingMsgId || crypto.randomUUID();
     const total = Math.ceil(data.length / MTU);
+
+    const nextHop = this.config.topology.getNextHopUrl(target);
+    assert(nextHop, `Unreachable: ${target}`);
 
     for (let i = 0; i < total; i++) {
       const chunk = data.substring(i * MTU, (i + 1) * MTU);
       const packet = this.createPacket(target, msgId, chunk, i, total, type);
 
-      const nextHop = this.config.topology.getNextHopUrl(target);
-      assert(nextHop, `No route found for target: ${target}`);
-
-      await fetch(`${nextHop}/receive`, {
+      const response = await fetch(`${nextHop}/receive`, {
         method: "POST",
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify(packet),
       });
+
+      if (!response.ok) {
+        this.logger.log(`Chunk ${i} failed to send to ${nextHop}`);
+      }
+    }
+  }
+
+  // --- CRYPTO UTILS ---
+
+  private deriveSessionKey(premaster: Buffer, r1: string, r2: string): Buffer {
+    return crypto.createHash('sha256').update(Buffer.concat([premaster, Buffer.from(r1), Buffer.from(r2)])).digest();
+  }
+
+  private encrypt(text: string, key: Buffer): string {
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+    return Buffer.concat([iv, cipher.update(text, 'utf8'), cipher.final(), cipher.getAuthTag()]).toString('base64');
+  }
+
+  private handleSecureData(data: string, from: string) {
+    const key = this.sessionKeys.get(from);
+    assert(key, `No session key established for node ${from}`);
+
+    try {
+      const [ivHex, tagHex, encryptedHex] = data.split(':');
+
+      const decipher = crypto.createDecipheriv(
+        'aes-256-gcm',
+        key,
+        Buffer.from(ivHex, 'hex')
+      );
+
+      decipher.setAuthTag(Buffer.from(tagHex, 'hex'));
+
+      let decrypted = decipher.update(encryptedHex, 'hex', 'utf8');
+      decrypted += decipher.final('utf8');
+
+      this.logger.log(`[SECURE DATA FROM ${from}] (Decrypted): ${decrypted}`);
+    } catch (err: any) {
+      this.logger.log(`Decryption failed from ${from}: ${err.message}`);
     }
   }
 
   private createPacket(dest: string, msgId: string, body: string, idx: number, total: number, type: PacketType): NetworkPacket {
-    return {
-      header: {
-        src: this.config.nodeId,
-        dest,
-        msgId,
-        packetIdx: idx,
-        total,
-        type,
-      },
-      body,
-    };
+    return {header: {src: this.config.nodeId, dest, msgId, packetIdx: idx, total, type}, body};
   }
 }
 
-export default new Node(new NodeConfig());
+export default new Node(new NodeConfig())
+
